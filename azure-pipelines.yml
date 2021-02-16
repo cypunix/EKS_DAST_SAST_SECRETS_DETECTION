@@ -1,0 +1,149 @@
+pool:
+  name: Azure Pipelines
+
+  
+steps:
+- bash: |
+   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.34.0/install.sh | bash
+   . ~/.nvm/nvm.sh
+   nvm install 13
+   node -e "console.log('Running Node.js ' + process.version)"
+   
+  displayName: 'install node'
+
+- bash: |
+   # Write your commands here
+   
+   export VER="1.24.0"
+   wget https://github.com/zricethezav/gitleaks/releases/download/v$VER/gitleaks-linux-amd64
+   
+   mv gitleaks-linux-amd64 gitleaks
+   chmod +x gitleaks
+   sudo mv gitleaks /usr/local/bin/
+   /usr/local/bin/gitleaks --repo-path=./ -v --report=$(Build.ArtifactStagingDirectory)/secret-detecion-report.json || true
+   
+   
+  displayName: 'secret detection'
+
+- task: PublishPipelineArtifact@1
+  displayName: 'Publish secret-detecion-report.json'
+  inputs:
+    targetPath: '$(Build.ArtifactStagingDirectory)/secret-detecion-report.json'
+    artifact: 'secret-detecion-report.json'
+
+- bash: |
+   # Write your commands here
+   
+   docker run --rm -e "WORKSPACE=${PWD}" -v $PWD:/app shiftleft/scan scan --build | tee -a $(Build.ArtifactStagingDirectory)/sast-report.json || true
+   
+  displayName: 'sast scan'
+
+- task: PublishPipelineArtifact@1
+  displayName: 'Publish sast-report.json'
+  inputs:
+    targetPath: '$(Build.ArtifactStagingDirectory)/sast-report.json'
+    artifact: 'sast-report.json'
+
+- task: Docker@2
+  displayName: build
+  inputs:
+    command: build
+    tags: |
+     $(Build.BuildId)
+     latest
+    arguments: '-t juice-shop:$(Build.BuildNumber)'
+
+- task: AmazonWebServices.aws-vsts-tools.ECRPushImage.ECRPushImage@1
+  displayName: 'Push Image:  juice-shop'
+  inputs:
+    awsCredentials: 'AWS-SBX-Cloud-Infrastructure'
+    regionName: 'ap-northeast-1'
+    sourceImageName: 'juice-shop'
+    sourceImageTag: '$(Build.BuildId)'
+    repositoryName: 'juice-shop'
+    pushTag: '$(Build.BuildNumber)'
+    autoCreateRepository: true
+
+- bash: |
+   sudo curl -L "https://github.com/docker/compose/releases/download/1.28.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+   sudo chmod +x /usr/local/bin/docker-compose
+   
+   cat > docker-compose.yml  << "END"
+   target:
+     # The target application we want to scan
+     image: juice-shop:$(Build.BuildNumber)
+     # The port that the application is available on.
+     # If the application runs on a non-standard port,
+     # you can map it to 80 for convenience by using
+     ports:
+       - "3000:3000"
+   zaproxy:
+     image: owasp/zap2docker-stable
+     command: zap-full-scan.py -t http://HOSTNAME:3000
+     links:
+       - target
+     volumes:
+       - PWD/:/zap/wrk/:rw
+   END
+   sed -i -e "s|PWD|$(pwd)|g" docker-compose.yml
+   sed -i -e "s/HOSTNAME/$(hostname)/g" docker-compose.yml
+   
+   sudo /usr/local/bin/docker-compose -f docker-compose.yml up --abort-on-container-exit | tee -a $(Build.ArtifactStagingDirectory)/dast-report.txt
+   
+  displayName: 'dast test'
+
+- task: PublishPipelineArtifact@1
+  displayName: 'Publish dast-report.txt'
+  inputs:
+    artifact: '$(Build.ArtifactStagingDirectory)/dast-report.txt'
+
+- bash: |
+   # Write your commands here
+   
+   echo 'stop on errors and create a ticket with logs'
+   
+  displayName: 'Stop on errors and create a ticket'
+
+- bash: |
+   cat > $(Build.SourcesDirectory)/application.yml  << END
+   apiVersion: v1
+   kind: Pod
+   metadata:
+     name: juice-shop
+   spec:
+     containers:
+     - name: application
+       image: 562593495925.dkr.ecr.ap-northeast-1.amazonaws.com/juice-shop:$(Build.BuildNumber)
+   END
+   
+   cat > $(Build.SourcesDirectory)/deployment.yml  << END
+   apiVersion: apps/v1
+   kind: Deployment
+   metadata:
+     name: juice-shop-deployment
+     labels:
+       app: juice-shop
+   spec:
+     replicas: 3
+     selector:
+       matchLabels:
+         app: juice-shop
+     template:
+       metadata:
+         labels:
+           app: juice-shop
+       spec:
+         containers:
+         - name: juice-shop
+           image: 562593495925.dkr.ecr.ap-northeast-1.amazonaws.com/juice-shop:$(Build.BuildNumber)
+           ports:
+           - containerPort: 3000
+   END
+  displayName: 'k8 deployment'
+
+- task: KubernetesManifest@0
+  displayName: deploy
+  inputs:
+    kubernetesServiceConnection: npm
+    namespace: default
+    manifests: '$(Build.SourcesDirectory)/application.yml'

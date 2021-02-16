@@ -1,0 +1,19 @@
+[
+    {
+      "ParameterKey": "RemoteAccessCIDR",
+      "ParameterValue": "1.128.104.210/16"
+    },
+    {
+      "ParameterKey": "KeyPairName",
+      "ParameterValue": "ECSHostKey"
+    },
+    {
+      "ParameterKey": "AvailabilityZones",
+      "ParameterValue": "ap-northeast-1a, ap-northeast-1c, ap-northeast-1d"
+    },
+    {
+      "ParameterKey": "EKSPublicAccessEndpoint",
+      "ParameterValue": "Enabled"
+    }
+]
+
